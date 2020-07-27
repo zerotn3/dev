@@ -1,0 +1,1430 @@
+#!/bin/bash
+# @author: LÃ£ng Tá»­ CÃ´ Äá»™c
+# @website:  https://tinohost.com, https://kienthuclinux.com
+# @since: 2020
+
+
+gen_pass() {
+    MATRIX='0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+    LENGTH=16
+    while [ ${n:=1} -le $LENGTH ]; do
+        PASS="$PASS${MATRIX:$(($RANDOM%${#MATRIX})):1}"
+        let n+=1
+    done
+    echo "$PASS"
+}
+
+## tinopool func
+
+TINOPOOL(){
+cat > "tinopanel.conf" <<END
+[tinopanel]
+listen = /dev/shm/tinopanel.$sock_tino.sock;
+user = tinopanel
+group = tinopanel
+listen.owner = nginx
+listen.group = nginx
+listen.mode = 0644
+;listen.allowed_clients = 127.0.0.1
+pm = ondemand
+pm.max_children = 15
+pm.start_servers = 5
+pm.min_spare_servers = 3
+pm.max_spare_servers = 10
+pm.max_requests = 500
+END
+cat >>  "../../lib/php.ini" <<END
+zend_extension=opcache.so
+opcache.enable=1
+opcache.enable_cli=1
+opcache.memory_consumption=128
+opcache.interned_strings_buffer=16
+opcache.max_accelerated_files=4000
+opcache.max_wasted_percentage=5
+opcache.use_cwd=1
+opcache.validate_timestamps=1
+opcache.revalidate_freq=60
+opcache.fast_shutdown=1
+opcache.blacklist_filename=/etc/opcache-default.blacklist
+END
+cat > /etc/opcache-default.blacklist <<END
+/home/*/public_html/wp-content/plugins/backwpup/*
+/home/*/public_html/wp-content/plugins/duplicator/*
+/home/*/public_html/wp-content/plugins/updraftplus/*
+/opt/tinopanel/private_html/
+END
+}
+
+
+
+## func nginx
+
+CREATE_USER_NGINX() {
+	if [ ! `cat /etc/passwd | grep nginx` ]; then
+		groupadd -r nginx 
+        useradd -r -s /sbin/nologin -M -c "nginx service" -g nginx nginx
+		echo "Finished create user nginx, continues create startup script..."
+		sleep 5
+	else
+		echo "existed user nginx, continues create startup script..."
+		sleep 5
+fi
+}
+
+RUN_COMPILE_NGINX() {
+	./configure \
+		--prefix=/etc/nginx  \
+		--conf-path=/etc/nginx/nginx.conf  \
+		--user=nginx  \
+		--group=nginx  \
+		--sbin-path=/usr/sbin/nginx  \
+		--with-zlib=/root/tino/nginx/zlib-1.2.11  \
+		--with-http_stub_status_module  \
+		--with-http_realip_module  \
+		--with-openssl=/root/tino/nginx/openssl-1.0.2t \
+		--with-http_geoip_module  \
+		--with-http_v2_module  \
+		--without-http_memcached_module  \
+		--with-http_ssl_module  \
+		--with-http_gzip_static_module  \
+		--with-http_perl_module  \
+		--with-pcre \
+		--with-http_secure_link_module  \
+		--without-mail_pop3_module  \
+		--without-mail_imap_module  \
+		--without-mail_smtp_module  \
+		--without-http_split_clients_module  \
+		--without-http_empty_gif_module  \
+		--without-http_browser_module  \
+		--without-http_userid_module  \
+		--add-module=/root/tino/nginx/incubator-pagespeed-ngx-1.13.35.2-stable  \
+		--add-module=/root/tino/nginx/nginx-module-vts  \
+		--add-module=/root/tino/nginx/ngx_cache_purge  \
+		--add-module=/root/tino/nginx/testcookie-nginx-module  \
+		--add-module=/root/tino/nginx/headers-more-nginx-module \
+		--add-module=/root/tino/nginx/ngx_brotli
+}
+
+
+CREATE_STARTUP_SCRIPT_NGX() {
+cat > "/lib/systemd/system/nginx.service" <<END
+[Unit]
+Description=The NGINX HTTP and reverse proxy server
+After=syslog.target network.target remote-fs.target nss-lookup.target
+
+[Service]
+Type=forking
+PIDFile=/var/run/nginx.pid
+ExecStartPre=/usr/sbin/nginx -t
+ExecStart=/usr/sbin/nginx
+ExecReload=/bin/kill -s HUP $MAINPID
+ExecStop=/bin/kill -s QUIT $MAINPID
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+END
+
+mkdir -p /var/cache/nginx  >/dev/null 2>&1
+mkdir -p /var/log/nginx  >/dev/null 2>&1
+cat > "/etc/nginx/nginx.conf" <<END
+user nginx nginx;
+worker_processes auto;
+worker_rlimit_nofile 8192;
+
+error_log /var/log/nginx/error.log notice;
+pid /var/run/nginx.pid;
+include /usr/share/nginx/modules/*.conf;
+
+events {
+	worker_connections 1024;
+	use epoll;
+}
+
+http {
+	server_names_hash_max_size 2048;
+	server_tokens off;
+	more_set_headers 'Server: tino-panel';
+	vhost_traffic_status_zone;
+
+    map \$geoip_country_code \$allowed_country {
+        default yes;
+       # CN no;
+    }
+    map \$http_host \$blogid {
+    default -999;
+    }
+    geo \$allowed_ip {
+        default yes;
+        127.0.0.1 yes;
+        192.168.1.0/24 yas;
+    }
+   	 server_names_hash_bucket_size 1024;
+
+	include /etc/nginx/mime.types;
+	default_type application/octet-stream;
+
+	log_format	main	'\$remote_addr - \$remote_user [\$time_local] "\$request" '
+						'\$status \$body_bytes_sent "\$http_referer" '
+						'"\$http_user_agent" "\$http_x_forwarded_for" '
+						'\$request_time \$upstream_response_time \$pipe';
+
+	disable_symlinks if_not_owner;
+
+	sendfile on;
+	tcp_nopush on;
+	tcp_nodelay on;
+	types_hash_max_size 2048;
+	variables_hash_max_size 1024;
+	variables_hash_bucket_size 128;
+
+	keepalive_requests 300;
+	keepalive_timeout 30;
+
+	client_body_temp_path /var/lib/nginx/cache/client_body 1 2;
+	client_max_body_size 192m;
+	client_body_buffer_size 2048k;
+	client_body_timeout 30s;
+	client_header_timeout 30s;
+
+	connection_pool_size 256;
+	
+	brotli on;
+	brotli_static on;
+	brotli_buffers 16 8k;
+	brotli_comp_level 6;
+	brotli_types
+		text/css
+		text/javascript
+		text/xml
+		text/plain
+		text/x-component
+		application/javascript
+		application/x-javascript
+		application/json
+		application/xml
+		application/rss+xml
+		application/vnd.ms-fontobject
+		font/truetype
+		font/opentype
+		image/svg+xml;
+	
+
+	gzip on;
+	gzip_disable "MSIE [1-6]\.";
+	gzip_static on;
+	gzip_comp_level 9;
+	gzip_http_version 1.1;
+	gzip_proxied any;
+	gzip_vary on;
+	gzip_buffers 16 8k;
+	gzip_min_length 1100;
+	gzip_types
+		text/css
+		text/javascript
+		text/xml
+		text/plain
+		text/x-component
+		application/javascript
+		application/x-javascript
+		application/json
+		application/xml
+		application/rss+xml
+		application/vnd.ms-fontobject
+		font/truetype
+		font/opentype
+		image/svg+xml;	
+	
+
+	index index.html index.php;
+	charset UTF-8;
+	ignore_invalid_headers on;
+
+	pagespeed off;
+	pagespeed FileCachePath /var/lib/nginx/cache/pagespeed;
+	pagespeed FileCacheSizeKb 204800;
+	pagespeed FileCacheCleanIntervalMs 3600000;
+	pagespeed FileCacheInodeLimit 100000;
+	pagespeed MemcachedThreads 1;
+	pagespeed MemcachedServers "localhost:11211";
+	pagespeed MemcachedTimeoutUs 100000;
+	pagespeed RewriteLevel CoreFilters;
+	pagespeed EnableFilters collapse_whitespace,remove_comments,extend_cache;
+	pagespeed DisableFilters combine_css,combine_javascript;
+	pagespeed LowercaseHtmlNames on;
+	pagespeed StatisticsPath /ngx_pagespeed_statistics;
+	pagespeed GlobalStatisticsPath /ngx_pagespeed_global_statistics;
+	pagespeed MessagesPath /ngx_pagespeed_message;
+	pagespeed ConsolePath /pagespeed_console;
+	pagespeed AdminPath /pagespeed_admin;
+	pagespeed GlobalAdminPath /pagespeed_global_admin;
+	pagespeed MessageBufferSize 100000;
+	pagespeed UsePerVhostStatistics on;
+	pagespeed FetchHttps enable;
+	pagespeed FetchHttps enable,allow_self_signed;
+	pagespeed SslCertDirectory /etc/pki/tls/certs;
+	pagespeed SslCertFile /etc/pki/tls/cert.pem;
+	pagespeed EnableCachePurge on;
+	pagespeed InPlaceResourceOptimization on;
+	
+	proxy_cache_path /var/lib/nginx/cache/proxy levels=1:2 keys_zone=PROXYCACHE:100m max_size=200m inactive=60m;
+	proxy_temp_path /var/lib/nginx/cache/proxy_tmp;
+	proxy_connect_timeout 30;
+	proxy_read_timeout 300;
+	proxy_send_timeout 300;
+	proxy_buffers 16 32k;
+	proxy_buffering on;
+	proxy_buffer_size 64k;
+	proxy_busy_buffers_size 96k;
+	proxy_temp_file_write_size 96k;
+	proxy_cache_key "\$scheme://\$host\$request_uri";
+
+	fastcgi_cache_path /var/lib/nginx/cache/fastcgi levels=1:2 keys_zone=FCGICACHE:100m max_size=200m inactive=60m;
+	fastcgi_temp_path /var/lib/nginx/cache/fastcgi_tmp;
+	fastcgi_cache_key "\$scheme\$request_method\$host\$request_uri";
+	fastcgi_cache_use_stale error timeout invalid_header http_500;
+	fastcgi_ignore_headers Cache-Control Expires Set-Cookie;
+	fastcgi_send_timeout 300;
+	fastcgi_read_timeout 300;
+	fastcgi_buffers 8 256k;
+	fastcgi_buffer_size 256k;
+	fastcgi_busy_buffers_size 256k;
+	fastcgi_index index.php;
+	include fastcgi_params;
+	fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+	
+	limit_req_zone \$binary_remote_addr zone=wplogin:50m rate=10r/m;
+
+        upstream php {
+               #server 127.0.0.1:9000;
+		server unix:/dev/shm/tinopanel.$sock_tino.sock;
+        }
+
+        server {
+                listen $admin_port default_server;
+                server_name _;
+                root /opt/tinopanel/private_html;
+                access_log /var/log/nginx/default-access_log;
+                error_log /var/log/nginx/default-error_log warn;
+				auth_basic "Restricted";
+	            auth_basic_user_file /opt/tinopanel/ssl/.htpasswd;
+		if (\$bad_bot) { return 444; }
+                
+		server_name_in_redirect off;
+
+                include conf.d/custom/restrictions.conf;
+                #include conf.d/custom/pagespeed.conf;
+                include conf.d/custom/fpm-default.conf;
+            
+            location /stub_status {
+        	stub_status;
+ 	        allow 127.0.0.1;	#only allow requests from localhost
+ 	        deny all;		#deny all other hosts	
+             }
+            
+                
+        }
+
+	include /etc/nginx/conf.d/vhosts/*.conf;
+	include /etc/nginx/conf.d/custom/blacklist.conf;
+	include /etc/nginx/conf.d/custom/cloudflare.conf;
+}
+END
+
+cat > "/etc/nginx/fastcgi.conf" <<END
+fastcgi_param  SCRIPT_FILENAME    \$document_root\$fastcgi_script_name;
+fastcgi_param  QUERY_STRING	  \$query_string;
+fastcgi_param  REQUEST_METHOD     \$request_method;
+fastcgi_param  CONTENT_TYPE	  \$content_type;
+fastcgi_param  CONTENT_LENGTH     \$content_length;
+
+fastcgi_param  SCRIPT_NAME        \$fastcgi_script_name;
+fastcgi_param  REQUEST_URI        \$request_uri;
+fastcgi_param  DOCUMENT_URI	  \$document_uri;
+fastcgi_param  DOCUMENT_ROOT	  \$document_root;
+fastcgi_param  SERVER_PROTOCOL    \$server_protocol;
+fastcgi_param  REQUEST_SCHEME     \$scheme;
+fastcgi_param  HTTPS              \$https if_not_empty;
+
+fastcgi_param  GATEWAY_INTERFACE  CGI/1.1;
+fastcgi_param  SERVER_SOFTWARE    nginx/\$nginx_version;
+
+fastcgi_param  REMOTE_ADDR        \$remote_addr;
+fastcgi_param  REMOTE_PORT        \$remote_port;
+fastcgi_param  SERVER_ADDR        \$server_addr;
+fastcgi_param  SERVER_PORT        \$server_port;
+fastcgi_param  SERVER_NAME        \$server_name;
+
+# PHP only, required if PHP was built with --enable-force-cgi-redirect
+fastcgi_param  REDIRECT_STATUS    200;
+END
+cat > "/etc/nginx/fastcgiproxy.conf" <<END
+set_real_ip_from 199.27.128.0/21;
+set_real_ip_from 173.245.48.0/20;
+set_real_ip_from 103.21.244.0/22;
+set_real_ip_from 103.22.200.0/22;
+set_real_ip_from 103.31.4.0/22;
+set_real_ip_from 141.101.64.0/18;
+set_real_ip_from 108.162.192.0/18;
+set_real_ip_from 190.93.240.0/20;
+set_real_ip_from 188.114.96.0/20;
+set_real_ip_from 197.234.240.0/22;
+set_real_ip_from 198.41.128.0/17;
+set_real_ip_from 162.158.0.0/15;
+set_real_ip_from 104.16.0.0/12;
+set_real_ip_from 172.64.0.0/13;
+set_real_ip_from 2400:cb00::/32;
+set_real_ip_from 2606:4700::/32;
+set_real_ip_from 2803:f800::/32;
+set_real_ip_from 2405:b500::/32;
+set_real_ip_from 2405:8100::/32;
+real_ip_header CF-Connecting-IP;
+real_ip_recursive on;
+END
+}
+
+# func php-fpm
+COMPILE_PHP_7_4() {
+cd $tino
+mkdir php74
+cd php74
+wget https://www.php.net/distributions/$php_74.tar.gz
+tar -vzxf php*
+cd /root/tino/php74/php-7*
+
+./configure  '--prefix=/opt/php/php74' '--with-zlib-dir' '--enable-calendar' '--enable-gd' '--with-curl' '--enable-inline-optimization' '--with-bz2' '--with-zlib' '--enable-sockets' '--enable-sysvsem' '--enable-sysvshm' '--enable-pcntl' '--enable-mbregex' '--with-mhash' '--with-mysql-sock=/var/lib/mysql/mysql.sock' '--with-pdo-mysql' '--with-mysqli' '--with-openssl' '--with-fpm-user=nginx' '--with-fpm-group=nginx' '--with-libdir=lib64' '--enable-ftp' '--enable-opcache' '--enable-bcmath' '--enable-fpm'  '--enable-mbstring' '--with-pear'
+make && make install
+
+cp -f php.ini-production /opt/php/php74/lib/php.ini
+upload_max_filesize=2048M
+post_max_size=2048M
+max_execution_time=300
+max_input_time=300
+for key in upload_max_filesize post_max_size max_execution_time max_input_time
+do
+ sed -i "s/^\($key\).*/\1 $(eval echo = \${$key})/" /opt/php/php74/lib/php.ini
+done
+
+cat > "/opt/php/php74/etc/php-fpm.conf" <<END
+[global]
+pid = run/php-fpm.pid
+include=/opt/php/php74/etc/php-fpm.d/*.conf
+END
+mkdir -p /opt/php/php74/etc/php-fpm.d/ >/dev/null 2>&1
+cat > "/lib/systemd/system/php-fpm-74.service" <<END
+[Unit]
+Description=The PHP FastCGI Process Manager
+After=network.target
+[Service]
+Type=simple
+PIDFile=/opt/php/php74/var/run/php-fpm.pid
+ExecStart=/opt/php/php74/sbin/php-fpm --nodaemonize --fpm-config /opt/php/php74/etc/php-fpm.conf
+ExecReload=/bin/kill -USR2 $MAINPID
+PrivateTmp=true
+[Install]
+WantedBy=multi-user.target
+END
+cd /opt/php/php74/bin
+yes | cp /usr/local/lib/libzip/include/zipconf.h /usr/local/include/zipconf.h
+./pecl install zip
+echo extension=zip.so >> /opt/php/php74/lib/php.ini
+}
+
+COMPILE_PHP_7_3() {
+
+cd $tino
+mkdir php73
+cd php73
+wget https://www.php.net/distributions/$php_73.tar.gz
+tar -vzxf php*
+cd /root/tino/php73/php-7*
+
+yes | cp /usr/local/lib/libzip/include/zipconf.h /usr/local/include/zipconf.h
+
+./configure  '--prefix=/opt/php/php73' '--with-zlib-dir' '--with-freetype-dir' '--with-libxml-dir=/usr' '--enable-calendar' '--with-curl' '--with-gd' '--enable-inline-optimization' '--with-bz2' '--with-zlib' '--enable-sockets' '--enable-sysvsem' '--enable-sysvshm' '--enable-pcntl' '--enable-mbregex' '--with-mhash' '--enable-zip' '--with-pcre-regex' '--with-mysql-sock=/var/lib/mysql/mysql.sock' '--with-pdo-mysql' '--with-mysqli' '--with-jpeg-dir=/usr' '--with-png-dir=/usr' '--with-openssl' '--with-fpm-user=nginx' '--with-fpm-group=nginx' '--with-libdir=lib64' '--enable-ftp' '--enable-opcache' '--enable-bcmath' '--enable-fpm' '--enable-mbstring'
+make && make install
+cp -f php.ini-production /opt/php/php73/lib/php.ini
+
+upload_max_filesize=2048M
+post_max_size=2048M
+max_execution_time=300
+max_input_time=300
+for key in upload_max_filesize post_max_size max_execution_time max_input_time
+do
+ sed -i "s/^\($key\).*/\1 $(eval echo = \${$key})/" /opt/php/php73/lib/php.ini
+done
+
+cat > "/opt/php/php73/etc/php-fpm.conf" <<END
+[global]
+pid = run/php-fpm.pid
+include=/opt/php/php73/etc/php-fpm.d/*.conf
+END
+mkdir -p /opt/php/php73/etc/php-fpm.d/ >/dev/null 2>&1
+cat > "/lib/systemd/system/php-fpm-73.service" <<END
+[Unit]
+Description=The PHP FastCGI Process Manager
+After=network.target
+[Service]
+Type=simple
+PIDFile=/opt/php/php73/var/run/php-fpm.pid
+ExecStart=/opt/php/php73/sbin/php-fpm --nodaemonize --fpm-config /opt/php/php73/etc/php-fpm.conf
+ExecReload=/bin/kill -USR2 $MAINPID
+PrivateTmp=true
+[Install]
+WantedBy=multi-user.target
+END
+}
+
+COMPILE_PHP_7_2() {
+cd $tino
+mkdir php72
+cd php72
+wget https://www.php.net/distributions/$php_72.tar.gz
+tar -vzxf php*
+cd /root/tino/php72/php-7*
+
+./configure  '--prefix=/opt/php/php72' '--with-zlib-dir' '--with-freetype-dir' '--with-libxml-dir=/usr' '--enable-calendar' '--with-curl' '--with-gd' '--enable-inline-optimization' '--with-bz2' '--with-zlib' '--enable-sockets' '--enable-sysvsem' '--enable-sysvshm' '--enable-pcntl' '--enable-mbregex' '--with-mhash' '--enable-zip' '--with-pcre-regex' '--with-mysql-sock=/var/lib/mysql/mysql.sock' '--with-pdo-mysql' '--with-mysqli' '--with-jpeg-dir=/usr' '--with-png-dir=/usr' '--with-openssl' '--with-fpm-user=nginx' '--with-fpm-group=nginx' '--with-libdir=lib64' '--enable-ftp' '--enable-opcache' '--enable-bcmath' '--enable-fpm' '--enable-mbstring'
+make && make install
+cp -f php.ini-production /opt/php/php72/lib/php.ini
+upload_max_filesize=2048M
+post_max_size=2048M
+max_execution_time=300
+max_input_time=300
+for key in upload_max_filesize post_max_size max_execution_time max_input_time
+do
+ sed -i "s/^\($key\).*/\1 $(eval echo = \${$key})/" /opt/php/php72/lib/php.ini
+done
+
+cat > "/opt/php/php72/etc/php-fpm.conf" <<END
+[global]
+pid = run/php-fpm.pid
+include=/opt/php/php72/etc/php-fpm.d/*.conf
+END
+mkdir -p /opt/php/php72/etc/php-fpm.d/ >/dev/null 2>&1
+cat > "/lib/systemd/system/php-fpm-72.service" <<END
+[Unit]
+Description=The PHP FastCGI Process Manager
+After=network.target
+[Service]
+Type=simple
+PIDFile=/opt/php/php72/var/run/php-fpm.pid
+ExecStart=/opt/php/php72/sbin/php-fpm --nodaemonize --fpm-config /opt/php/php72/etc/php-fpm.conf
+ExecReload=/bin/kill -USR2 $MAINPID
+PrivateTmp=true
+[Install]
+WantedBy=multi-user.target
+END
+}
+
+COMPILE_PHP_7_1() {
+#cd /root/tino/
+#rm -rf /root/tino/binson*
+#rm -rf /usr/bin/bison
+#rm -rf /usr/local/bin/bison
+#wget http://ftp.gnu.org/gnu/bison/bison-3.4.tar.gz
+#tar -vzxf bison-*
+#cd bison-*
+#./configure 
+#make && make install
+#ln -s /usr/local/bin/bison /usr/bin/bison
+
+#rm -rf /root/tino/php-src
+#cd /root/tino
+#git clone https://github.com/php/php-src.git
+#cd php-src
+#git checkout PHP-7.1
+#./buildconf
+
+cd $tino
+mkdir php71
+cd php71
+wget https://www.php.net/distributions/$php_71.tar.gz
+tar -vzxf php*
+cd /root/tino/php71/php-7*
+
+./configure  '--prefix=/opt/php/php71' '--with-zlib-dir' '--with-freetype-dir' '--with-libxml-dir=/usr' '--enable-calendar' '--with-curl' '--with-mcrypt' '--with-gd' '--enable-inline-optimization' '--with-bz2' '--with-zlib' '--enable-sockets' '--enable-sysvsem' '--enable-sysvshm' '--enable-pcntl' '--enable-mbregex' '--with-mhash' '--enable-zip' '--with-pcre-regex' '--with-mysql-sock=/var/lib/mysql/mysql.sock' '--with-pdo-mysql' '--with-mysqli' '--with-jpeg-dir=/usr' '--with-png-dir=/usr' '--enable-gd-native-ttf' '--with-openssl' '--with-fpm-user=nginx' '--with-fpm-group=nginx' '--with-libdir=lib64' '--enable-ftp' '--enable-opcache' '--enable-bcmath' '--enable-fpm' '--enable-mbstring'
+make && make install
+cp -f php.ini-production /opt/php/php71/lib/php.ini
+upload_max_filesize=2048M
+post_max_size=2048M
+max_execution_time=300
+max_input_time=300
+for key in upload_max_filesize post_max_size max_execution_time max_input_time
+do
+ sed -i "s/^\($key\).*/\1 $(eval echo = \${$key})/" /opt/php/php71/lib/php.ini
+done
+
+cat > "/opt/php/php71/etc/php-fpm.conf" <<END
+[global]
+pid = run/php-fpm.pid
+include=/opt/php/php71/etc/php-fpm.d/*.conf
+END
+mkdir -p /opt/php/php71/etc/php-fpm.d/ >/dev/null 2>&1
+cat > "/lib/systemd/system/php-fpm-71.service" <<END
+[Unit]
+Description=The PHP FastCGI Process Manager
+After=network.target
+[Service]
+Type=simple
+PIDFile=/opt/php/php70/var/run/php-fpm.pid
+ExecStart=/opt/php/php70/sbin/php-fpm --nodaemonize --fpm-config /opt/php/php70/etc/php-fpm.conf
+ExecReload=/bin/kill -USR2 $MAINPID
+PrivateTmp=true
+[Install]
+WantedBy=multi-user.target
+END
+}
+
+COMPILE_PHP_7_0() {
+cd $tino
+mkdir php70
+cd php70
+wget https://www.php.net/distributions/$php_70.tar.gz
+tar -vzxf php*
+cd /root/tino/php70/php-7*
+
+./configure  '--prefix=/opt/php/php70' '--with-zlib-dir' '--with-freetype-dir' '--with-libxml-dir=/usr' '--enable-calendar' '--with-curl' '--with-mcrypt' '--with-gd' '--enable-inline-optimization' '--with-bz2' '--with-zlib' '--enable-sockets' '--enable-sysvsem' '--enable-sysvshm' '--enable-pcntl' '--enable-mbregex' '--with-mhash' '--enable-zip' '--with-pcre-regex' '--with-mysql-sock=/var/lib/mysql/mysql.sock' '--with-pdo-mysql' '--with-mysqli' '--with-jpeg-dir=/usr' '--with-png-dir=/usr' '--enable-gd-native-ttf' '--with-openssl' '--with-fpm-user=nginx' '--with-fpm-group=nginx' '--with-libdir=lib64' '--enable-ftp' '--enable-opcache' '--enable-bcmath' '--enable-fpm' '--enable-mbstring'
+make && make install
+cp -f php.ini-production /opt/php/php70/lib/php.ini
+upload_max_filesize=2048M
+post_max_size=2048M
+max_execution_time=300
+max_input_time=300
+for key in upload_max_filesize post_max_size max_execution_time max_input_time
+do
+ sed -i "s/^\($key\).*/\1 $(eval echo = \${$key})/" /opt/php/php70/lib/php.ini
+done
+
+cat > "/opt/php/php70/etc/php-fpm.conf" <<END
+[global]
+pid = run/php-fpm.pid
+include=/opt/php/php70/etc/php-fpm.d/*.conf
+END
+mkdir -p /opt/php/php70/etc/php-fpm.d/ >/dev/null 2>&1
+cat > "/lib/systemd/system/php-fpm-70.service" <<END
+[Unit]
+Description=The PHP FastCGI Process Manager
+After=network.target
+[Service]
+Type=simple
+PIDFile=/opt/php/php70/var/run/php-fpm.pid
+ExecStart=/opt/php/php70/sbin/php-fpm --nodaemonize --fpm-config /opt/php/php70/etc/php-fpm.conf
+ExecReload=/bin/kill -USR2 $MAINPID
+PrivateTmp=true
+[Install]
+WantedBy=multi-user.target
+END
+}
+
+COMPILE_PHP_5_6() {
+cd $tino
+mkdir php56
+cd php56
+wget https://www.php.net/distributions/$php_56.tar.gz
+tar -vzxf php*
+cd /root/tino/php56/php-5*
+./configure  '--prefix=/opt/php/php56' '--with-zlib-dir' '--with-freetype-dir' '--with-libxml-dir=/usr' '--enable-calendar' '--with-curl' '--with-mcrypt' '--with-gd' '--enable-inline-optimization' '--with-bz2' '--with-zlib' '--enable-sockets' '--enable-sysvsem' '--enable-sysvshm' '--enable-pcntl' '--enable-mbregex' '--with-mhash' '--enable-zip' '--with-pcre-regex' '--with-mysql' '--with-mysql-sock=/var/lib/mysql/mysql.sock' '--with-pdo-mysql' '--with-mysqli' '--with-jpeg-dir=/usr' '--with-png-dir=/usr' '--enable-gd-native-ttf' '--with-openssl' '--with-fpm-user=nginx' '--with-fpm-group=nginx' '--with-libdir=lib64' '--enable-ftp' '--enable-opcache' '--enable-bcmath' '--enable-fpm' '--enable-mbstring'
+make && make install
+cp -f php.ini-production /opt/php/php56/lib/php.ini
+upload_max_filesize=512M
+post_max_size=512M
+max_execution_time=300
+max_input_time=300
+for key in upload_max_filesize post_max_size max_execution_time max_input_time
+do
+ sed -i "s/^\($key\).*/\1 $(eval echo = \${$key})/" /opt/php/php56/lib/php.ini
+done
+
+cat > "/opt/php/php56/etc/php-fpm.conf" <<END
+[global]
+pid = run/php-fpm.pid
+include=/opt/php/php56/etc/php-fpm.d/*.conf
+END
+mkdir -p /opt/php/php56/etc/php-fpm.d/ >/dev/null 2>&1
+cat > "/lib/systemd/system/php-fpm-56.service" <<END
+[Unit]
+Description=The PHP FastCGI Process Manager
+After=network.target
+[Service]
+Type=simple
+PIDFile=/opt/php/php56/var/run/php-fpm.pid
+ExecStart=/opt/php/php56/sbin/php-fpm --nodaemonize --fpm-config /opt/php/php56/etc/php-fpm.conf
+ExecReload=/bin/kill -USR2 $MAINPID
+PrivateTmp=true
+[Install]
+WantedBy=multi-user.target
+END
+}
+
+COMPILE_PHP_5_5() {
+cd /root/tino/
+rm -rf /root/tino/binson*
+rm -rf /usr/bin/bison
+rm -rf /usr/local/bin/bison
+wget http://ftp.gnu.org/gnu/bison/bison-2.4.tar.gz
+tar -vzxf bison-*
+cd bison-*
+./configure 
+make && make install
+ln -s /usr/local/bin/bison /usr/bin/bison
+
+rm -rf /root/tino/php-src
+cd /root/tino
+git clone https://github.com/php/php-src.git
+cd php-src
+git checkout PHP-5.5
+./buildconf --force
+./configure  '--prefix=/opt/php/php55' '--with-zlib-dir' '--with-freetype-dir' '--with-libxml-dir=/usr' '--enable-calendar' '--with-curl' '--with-mcrypt' '--with-gd' '--enable-inline-optimization' '--with-bz2' '--with-zlib' '--enable-sockets' '--enable-sysvsem' '--enable-sysvshm' '--enable-pcntl' '--enable-mbregex' '--with-mhash' '--enable-zip' '--with-pcre-regex' '--with-mysql' '--with-mysql-sock=/var/lib/mysql/mysql.sock' '--with-pdo-mysql' '--with-mysqli' '--with-jpeg-dir=/usr' '--with-png-dir=/usr' '--enable-gd-native-ttf' '--with-openssl' '--with-fpm-user=nginx' '--with-fpm-group=nginx' '--with-libdir=lib64' '--enable-ftp' '--enable-opcache' '--enable-bcmath' '--enable-fpm' '--enable-mbstring'
+make && make install
+cp -f php.ini-production /opt/php/php55/lib/php.ini
+upload_max_filesize=2048M
+post_max_size=2048M
+max_execution_time=300
+max_input_time=300
+for key in upload_max_filesize post_max_size max_execution_time max_input_time
+do
+ sed -i "s/^\($key\).*/\1 $(eval echo = \${$key})/" /opt/php/php55/lib/php.ini
+done
+
+cat > "/opt/php/php55/etc/php-fpm.conf" <<END
+[global]
+pid = run/php-fpm.pid
+include=/opt/php/php55/etc/php-fpm.d/*.conf
+END
+mkdir -p /opt/php/php55/etc/php-fpm.d/ >/dev/null 2>&1
+cat > "/lib/systemd/system/php-fpm-55.service" <<END
+[Unit]
+Description=The PHP FastCGI Process Manager
+After=network.target
+[Service]
+Type=simple
+PIDFile=/opt/php/php55/var/run/php-fpm.pid
+ExecStart=/opt/php/php55/sbin/php-fpm --nodaemonize --fpm-config /opt/php/php55/etc/php-fpm.conf
+ExecReload=/bin/kill -USR2 $MAINPID
+PrivateTmp=true
+[Install]
+WantedBy=multi-user.target
+END
+}
+COMPILE_PHP_5_4() {
+cd /root/tino/
+rm -rf /root/tino/binson*
+rm -rf /usr/bin/bison
+rm -rf /usr/local/bin/bison
+wget http://ftp.gnu.org/gnu/bison/bison-2.4.tar.gz
+tar -vzxf bison-*
+cd bison-*
+./configure 
+make && make install
+ln -s /usr/local/bin/bison /usr/bin/bison
+
+rm -rf /root/tino/php-src
+cd /root/tino
+git clone https://github.com/php/php-src.git
+cd php-src
+./buildconf --force
+./configure  '--prefix=/opt/php/php54' '--with-zlib-dir' '--with-freetype-dir' '--with-libxml-dir=/usr' '--enable-calendar' '--with-curl' '--with-mcrypt' '--with-gd' '--enable-inline-optimization' '--with-bz2' '--with-zlib' '--enable-sockets' '--enable-sysvsem' '--enable-sysvshm' '--enable-pcntl' '--enable-mbregex' '--with-mhash' '--enable-zip' '--with-pcre-regex' '--with-mysql' '--with-mysql-sock=/var/lib/mysql/mysql.sock' '--with-pdo-mysql' '--with-mysqli' '--with-jpeg-dir=/usr' '--with-png-dir=/usr' '--enable-gd-native-ttf' '--with-openssl' '--with-fpm-user=nginx' '--with-fpm-group=nginx' '--with-libdir=lib64' '--enable-ftp' '--enable-opcache' '--enable-bcmath' '--enable-fpm' '--enable-mbstring'
+make && make install
+cp -f php.ini-production /opt/php/php54/lib/php.ini
+upload_max_filesize=2048M
+post_max_size=2048M
+max_execution_time=300
+max_input_time=300
+for key in upload_max_filesize post_max_size max_execution_time max_input_time
+do
+ sed -i "s/^\($key\).*/\1 $(eval echo = \${$key})/" /opt/php/php54/lib/php.ini
+done
+
+cat > "/opt/php/php54/etc/php-fpm.conf" <<END
+[global]
+pid = run/php-fpm.pid
+include=/opt/php/php54/etc/php-fpm.d/*.conf
+END
+mkdir -p /opt/php/php54/etc/php-fpm.d/ >/dev/null 2>&1
+cat > "/lib/systemd/system/php-fpm-54.service" <<END
+[Unit]
+Description=The PHP FastCGI Process Manager
+After=network.target
+[Service]
+Type=simple
+PIDFile=/opt/php/php54/var/run/php-fpm.pid
+ExecStart=/opt/php/php54/sbin/php-fpm --nodaemonize --fpm-config /opt/php/php54/etc/php-fpm.conf
+ExecReload=/bin/kill -USR2 $MAINPID
+PrivateTmp=true
+[Install]
+WantedBy=multi-user.target
+END
+}
+COMPILE_PHP_5_3() {
+cd /root/tino/php53/php-5*
+./configure  '--prefix=/opt/php/php53' '--with-zlib-dir' '--with-freetype-dir' '--with-libxml-dir=/usr' '--enable-calendar' '--with-curl' '--with-mcrypt' '--with-gd' '--enable-inline-optimization' '--with-bz2' '--with-zlib' '--enable-sockets' '--enable-sysvsem' '--enable-sysvshm' '--enable-pcntl' '--enable-mbregex' '--with-mhash' '--enable-zip' '--with-pcre-regex' '--with-mysql' '--with-mysql-sock=/var/lib/mysql/mysql.sock' '--with-pdo-mysql' '--with-pdo-mysql=mysqlnd' '--with-jpeg-dir=/usr' '--with-png-dir=/usr' '--enable-gd-native-ttf' '--with-openssl' '--with-fpm-user=nginx' '--with-fpm-group=nginx' '--with-libdir=lib64' '--enable-ftp' '--enable-opcache' '--enable-bcmath' '--enable-fpm' '--enable-mbstring' 
+make && make install
+cp -f php.ini-production /opt/php/php53/lib/php.ini
+upload_max_filesize=2048M
+post_max_size=2048M
+max_execution_time=300
+max_input_time=300
+for key in upload_max_filesize post_max_size max_execution_time max_input_time
+do
+ sed -i "s/^\($key\).*/\1 $(eval echo = \${$key})/" /opt/php/php53/lib/php.ini
+done
+
+cat > "/opt/php/php53/etc/php-fpm.conf" <<END
+[global]
+pid = run/php-fpm.pid
+include=/opt/php/php53/etc/php-fpm.d/*.conf
+END
+mkdir -p /opt/php/php53/etc/php-fpm.d/ >/dev/null 2>&1
+cat > "/lib/systemd/system/php-fpm-53.service" <<END
+[Unit]
+Description=The PHP FastCGI Process Manager
+After=network.target
+[Service]
+Type=simple
+PIDFile=/opt/php/php53/var/run/php-fpm.pid
+ExecStart=/opt/php/php53/sbin/php-fpm --nodaemonize --fpm-config /opt/php/php53/etc/php-fpm.conf
+ExecReload=/bin/kill -USR2 $MAINPID
+PrivateTmp=true
+[Install]
+WantedBy=multi-user.target
+END
+}
+###########
+cat > "/etc/environment" <<END
+LANG=en_US.utf-8
+LC_ALL=en_US.utf-8
+END
+
+system_version=$(hostnamectl | grep "Operating System" | cut -f2 -d":" | cut -f4 -d" ")
+
+if [[ "$system_version" != "7" ]]; then
+echo "Tino Script chi ho tro Centos 7"
+rm -rf tinovps-install
+exit
+fi
+
+
+## check panel install
+
+if [ -d /usr/local/cpanel ]; then
+	echo -e "\ncPanel detected...exit...\n"
+	exit 1
+fi
+if [ -d /opt/plesk ]; then
+	echo -e "\nPlesk detected...exit...\n"
+	exit 1
+fi
+
+## check service
+
+if systemctl is-active --quiet httpd; then
+	echo -e "\nhttpd process detected, exit...\n"
+	exit
+fi
+if systemctl is-active --quiet apache2; then
+	echo -e "\napache2 process detected, exit...\n"
+	exit
+fi
+if systemctl is-active --quiet named; then
+	echo -e "\nnamed process detected, exit...\n"
+	exit
+fi
+if systemctl is-active --quiet mysqld; then
+	echo -e "\nmysql process detected, exit...\n"
+	exit
+fi
+if systemctl is-active --quiet exim; then
+	echo -e "\nexim process detected, exit...\n"
+	exit
+fi
+if systemctl is-active --quiet nginx; then
+	echo -e "\nnginx process detected, exit...\n"
+	exit
+fi
+
+
+
+## check root
+
+
+if [ "x$(id -u)" != 'x0' ]; then
+    echo 'Tino Script phai chay voi quyen root'
+    exit 1
+fi
+
+yum -y install gawk bc wget lsof
+clear
+echo "Moi phien ban php ban cai dat them se chiem khoang 200MB dung luong O cung va 15MB RAM"
+echo "Moi phien ban php ban cai dat them se mat khoang 15 phut combine"
+printf "Vui long tuy chon phien ban php ban muon cai dat ben duoi:\n"
+prompt="Nhap vao lua chon cua ban [1-5]: "
+php_version="7.4"; # Default PHP 7.4
+php_go="7_4"; 
+sock_tino=74;
+
+options=("Cai dat PHP 7.4" 
+"Cai dat PHP 7.3 (Recommend)" 
+"Cai dat PHP 7.2" 
+"Cai dat PHP 7.1" 
+"Cai dat PHP 7.0" 
+"Cat dat PHP 5.6"
+"Cai dat PHP 7.4 va PHP 5.6")
+PS3="$prompt"
+select opt in "${options[@]}"; do 
+    case "$REPLY" in
+    1) php_version="7.4"; php_go="7_4"; sock_tino=74; break;;
+    2) php_version="7.3"; php_go="7_3"; sock_tino=73;  break;;
+    3) php_version="7.2"; php_go="7_2"; sock_tino=72;  break;;
+    4) php_version="7.1"; php_go="7_1"; sock_tino=71;  break;;
+    5) php_version="7.0"; php_go="7_0"; sock_tino=70;  break;;
+    6) php_version="5.6"; php_go="5_6"; sock_tino=56;  break;;
+    7) php_version="7.4.5.6"; break;;
+    $(( ${#options[@]}+1 )) ) printf "\nHe thong se cai dat PHP 7.4\n"; break;;
+    *) printf "Ban nhap sai,he thong se cai dat phien ban mac dinh PHP 7.4\n"; break;;
+    esac    
+done
+
+admin_port="7979"
+
+if [ "$php_version" = "7.4" ]; then
+echo "phien ban php cai dat la php $php_version , thoi gian cai dat khoang 30 phut"
+sleep 10
+elif [ "$php_version" = "7.3" ]; then
+echo "phien ban php cai dat la php $php_version , thoi gian cai dat khoang 30 phut"
+sleep 10
+elif [ "$php_version" = "7.2" ]; then
+echo "phien ban php cai dat la php $php_version , thoi gian cai dat khoang 30 phut"
+sleep 10
+elif [ "$php_version" = "5.3" ]; then
+echo "phien ban php cai dat la php $php_version , thoi gian cai dat khoang 30 phut"
+sleep 10
+elif [ "$php_version" = "5.6" ]; then
+echo "phien ban php cai dat la php $php_version , thoi gian cai dat khoang 30 phut"
+sleep 10
+elif [ "$php_version" = "7.4.5.6" ]; then
+echo "phien ban php cai dat la 2 phien ban php 7.4 va 5.6 , thoi gian cai dat khoang 1 tieng"
+sleep 10
+elif [ "$php_version" = "7.4.5.3" ]; then
+echo "phien ban php cai dat tat ca phien ban php la:  7.4, 7.3, 7.2, 7.1, 7.0, 5.6, 5.5, 5.4, 5.3  , thoi gian cai dat khoang hon 1 tieng"
+sleep 10
+else "phien ban php cai dat la php $php_version , thoi gian cai dat khoang 30 phut"
+echo 
+fi
+
+
+rm -f /etc/localtime
+ln -sf /usr/share/zoneinfo/Asia/Ho_Chi_Minh /etc/localtime
+
+if [ -s /etc/selinux/config ]; then
+sed -i 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/selinux/config
+sed -i 's/SELINUX=permissive/SELINUX=disabled/g' /etc/selinux/config
+fi
+setenforce 0
+
+# Install EPEL + Remi Repo
+yum -y install epel-release yum-utils
+rpm -Uvh http://rpms.famillecollet.com/enterprise/remi-release-7.rpm
+
+systemctl stop  saslauthd.service
+systemctl disable saslauthd.service
+
+# Disable the FirewallD Service and use Iptables instead because FirewallD need reboot in order to start
+systemctl stop firewalld
+systemctl disable firewalld
+systemctl mask firewalld
+
+yum -y remove mysql* php* httpd* sendmail* postfix* rsyslog*
+yum clean all
+yum -y update
+yum install screen -y
+
+
+mkdir -p /root/tino/
+
+cd /root/tino/
+
+yum install -y epel-release
+yum install -y cmake3 cmake zlib-devel --enablerepo=epel 
+for x in git wget zip unzip perl-ExtUtils-Embed pam-devel gcc gcc-c++ make geoip-devel httpd-tools libxml2-devel libXpm-devel gmp-devel libicu-devel t1lib-devel aspell-devel openssl-devel bzip2-devel libcurl-devel libjpeg-devel libvpx-devel libpng-devel freetype-devel readline-devel libtidy-devel libxslt-devel libmcrypt-devel pcre-devel curl-devel mysql-devel ncurses-devel gettext-devel net-snmp-devel libevent-devel libtool-ltdl-devel libc-client-devel postgresql-devel php-pecl-zip libzip-devel libuuid-devel  net-tools libmaxminddb gd sqlite-devel;
+do
+yum install $x -y
+done
+
+
+yum install  oniguruma-devel -y
+yum install ImageMagick-devel -y
+yum groupinstall -y 'Development Tools'
+
+yum remove -y libzip*
+yum remove -y libzip
+wget https://nih.at/libzip/libzip-1.2.0.tar.gz
+tar -zxvf libzip-1.2.0.tar.gz
+cd libzip-1.2.0
+./configure
+make && make install
+echo '/usr/local/lib64
+/usr/local/lib
+/usr/lib
+/usr/lib64'>>/etc/ld.so.conf
+
+memory=$(grep 'MemTotal' /proc/meminfo |tr ' ' '\n' |grep [0-9])
+
+#----------------------------------------------------------#
+#                      Checking swap                       #
+#----------------------------------------------------------#
+
+# Checking swap on small instances
+
+if [ -z "$(swapon -s)" ] && [ $memory -lt 2000000 ]; then
+    fallocate -l 1G /swapfile
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+    echo "/swapfile   none    swap    sw    0   0" >> /etc/fstab
+fi
+
+
+# Install Others
+for x in install exim syslog-ng syslog-ng-libdbi cronie unzip zip nano openssl ntpdate;
+do
+yum install $x -y
+done
+
+ntpdate asia.pool.ntp.org
+hwclock --systohc
+
+
+## download file install 
+
+#git clone https://github.com/tinopanel/tino.git
+mkdir /root/tino
+tino='/root/tino'
+
+## cai dat php-fpm
+
+php_74="php-7.4.7";
+php_73="php-7.3.19";
+php_72="php-7.2.31";
+php_71="php-7.1.33";
+php_70="php-7.0.28";
+php_56="php-5.6.40";
+php_55="php-5.5.38";
+php_54="php-5.4.45";
+php_53="php-5.3.28";
+
+
+## cai dat php-fpm
+
+#cd $tino
+#mkdir php53
+#cd php53
+#wget https://www.php.net/distributions/$php_53.tar.gz
+#tar -vzxf php*
+#cd $tino
+#mkdir php56
+#cd php56
+#wget https://www.php.net/distributions/$php_56.tar.gz
+#tar -vzxf php*
+
+CREATE_USER_NGINX
+# install  php-fpm
+useradd -M -s /bin/nologin tinopanel
+
+
+yum  install re2c -y
+yum remove bison -y 
+cd /root/tino/
+
+
+if [ "$php_version" = "7.4.5.6" ]; then
+        COMPILE_PHP_7_4
+		sock_tino=74
+        rm -rf /opt/php/php74/etc/php-fpm.d/*
+	    cd /opt/php/php74/etc/php-fpm.d/
+        TINOPOOL
+		sock_tino=56
+        COMPILE_PHP_5_6
+		mkdir -p /opt/php/php56/etc/php-fpm.d
+	    cd /opt/php/php56/etc/php-fpm.d/
+        TINOPOOL
+        systemctl start php-fpm-74.service
+        systemctl enable php-fpm-74.service
+        systemctl start php-fpm-56.service
+        systemctl enable php-fpm-56.service
+		sock_tino=74
+        echo "Finshed compile PHP 7.4 and 5.6,..."
+                        sleep 10
+elif [ "$php_version" = "7.4.5.3" ]; then
+        COMPILE_PHP_7_4
+		sock_tino=74
+        rm -rf /opt/php/php74/etc/php-fpm.d/*
+	    cd /opt/php/php74/etc/php-fpm.d/
+        TINOPOOL
+		sock_tino=73
+		COMPILE_PHP_7_3
+        rm -rf /opt/php/php73/etc/php-fpm.d/*
+	    cd /opt/php/php73/etc/php-fpm.d/
+        TINOPOOL
+		sock_tino=72
+		COMPILE_PHP_7_2
+        rm -rf /opt/php/php72/etc/php-fpm.d/*
+	    cd /opt/php/php72/etc/php-fpm.d/
+        TINOPOOL
+		sock_tino=71
+		COMPILE_PHP_7_1
+        rm -rf /opt/php/php71/etc/php-fpm.d/*
+	    cd /opt/php/php71/etc/php-fpm.d/
+        TINOPOOL
+		sock_tino=70
+		COMPILE_PHP_7_0
+        rm -rf /opt/php/php70/etc/php-fpm.d/*
+	    cd /opt/php/php70/etc/php-fpm.d/
+        TINOPOOL
+		sock_tino=55
+		COMPILE_PHP_5_5
+        rm -rf /opt/php/php55/etc/php-fpm.d/*
+	    cd /opt/php/php55/etc/php-fpm.d/
+        TINOPOOL
+		sock_tino=54
+		COMPILE_PHP_5_4
+        rm -rf /opt/php/php54/etc/php-fpm.d/*
+	    cd /opt/php/php54/etc/php-fpm.d/
+        TINOPOOL
+		sock_tino=53
+		COMPILE_PHP_5_3
+        rm -rf /opt/php/php53/etc/php-fpm.d/*
+	    cd /opt/php/php53/etc/php-fpm.d/
+        TINOPOOL
+		sock_tino=56
+		COMPILE_PHP_5_6
+		mkdir -p /opt/php/php56/etc/php-fpm.d
+	    cd /opt/php/php56/etc/php-fpm.d/
+        TINOPOOL
+        systemctl start php-fpm-74.service
+        systemctl enable php-fpm-74.service
+        systemctl start php-fpm-53.service
+        systemctl enable php-fpm-53.service
+        systemctl start php-fpm-56.service
+        systemctl enable php-fpm-56.service
+        systemctl start php-fpm-54.service
+        systemctl enable php-fpm-54.service
+        systemctl start php-fpm-55.service
+        systemctl enable php-fpm-55.service
+        systemctl start php-fpm-70.service
+        systemctl enable php-fpm-70.service
+        systemctl start php-fpm-71.service
+        systemctl enable php-fpm-71.service
+        systemctl start php-fpm-72.service
+        systemctl enable php-fpm-72.service
+        systemctl start php-fpm-73.service
+        systemctl enable php-fpm-73.servicee
+		sock_tino=74
+        echo "Finshed compile PHP 7.4, 7.3, 7.2, 7.1, 7.0, 5.6 ..."
+                        sleep 10
+                        
+else
+        COMPILE_PHP_$php_go
+        
+        rm -rf /opt/php/php$sock_tino/etc/php-fpm.d/*
+	    cd /opt/php/php$sock_tino/etc/php-fpm.d/
+        TINOPOOL
+        systemctl start php-fpm-$sock_tino.service
+        systemctl enable php-fpm-$sock_tino.service
+        echo "Finshed compile PHP $sock_tino,..."
+                        sleep 10
+fi
+
+##### cai dat nginx
+mkdir $tino/nginx
+cd $tino/nginx
+
+# tai nginx
+NGINX_VERSION=1.18.0
+
+wget http://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz
+tar -xvzf nginx-${NGINX_VERSION}.tar.gz
+
+# tai module nginx
+
+cd /root/tino/nginx/
+NPS_VERSION=1.13.35.2-stable
+wget https://github.com/apache/incubator-pagespeed-ngx/archive/v${NPS_VERSION}.zip
+unzip v${NPS_VERSION}.zip
+nps_dir=$(find . -name "*pagespeed-ngx-${NPS_VERSION}" -type d)
+cd "$nps_dir"
+NPS_RELEASE_NUMBER=${NPS_VERSION/beta/}
+NPS_RELEASE_NUMBER=${NPS_VERSION/stable/}
+psol_url=https://dl.google.com/dl/page-speed/psol/${NPS_RELEASE_NUMBER}.tar.gz
+[ -e scripts/format_binary_url.sh ] && psol_url=$(scripts/format_binary_url.sh PSOL_BINARY_URL)
+wget ${psol_url}
+tar -xzvf $(basename ${psol_url})  # extracts to psol/
+
+cd $tino/nginx
+git clone https://github.com/google/ngx_brotli.git
+git clone git://github.com/vozlt/nginx-module-vts.git
+git clone git://github.com/FRiCKLE/ngx_cache_purge.git
+git clone git://github.com/kyprizel/testcookie-nginx-module.git
+wget https://ftp.openssl.org/source/old/1.0.2/openssl-1.0.2t.tar.gz
+wget https://download.videolan.org/contrib/zlib/zlib-1.2.11.tar.gz
+wget https://ftp.pcre.org/pub/pcre/pcre2-10.35.tar.gz
+wget https://github.com/apache/incubator-pagespeed-ngx/archive/latest-stable.zip
+
+git clone https://github.com/apache/incubator-pagespeed-ngx.git
+git clone https://github.com/openresty/headers-more-nginx-module.git
+unzip incubator-pagesp*
+tar -xvzf openssl*
+tar -xvzf zlib*
+tar -xvzf pcre*
+cd $tino/nginx/nginx*
+cd /root/tino/nginx/ngx_brotli/ && git submodule update --init && cd /root/tino/nginx/nginx-*
+
+RUN_COMPILE_NGINX
+make && make install
+#cd /etc/nginx/
+#https://scripts.tino.org/dhparam.pem
+#openssl dhparam 2048 -out /etc/nginx/dhparam.pem
+CREATE_STARTUP_SCRIPT_NGX
+mkdir -p /etc/nginx/conf.d/
+
+cd /etc/nginx/conf.d/
+
+wget https://scripts.tino.org/tino.zip
+unzip tino*
+rm -rf tino.zip
+
+mkdir -p /etc/nginx/conf.d/addon_confs
+mkdir -p /etc/nginx/conf.d/ssl
+
+systemctl start nginx.service
+systemctl enable nginx.service
+
+
+# vhost nginx
+mkdir -p /opt/tinopanel
+mkdir -p /opt/tinopanel/logs
+mkdir -p /opt/tinopanel/private_html
+mkdir -p /opt/tinopanel/ssl
+cd /opt/tinopanel/ssl
+server_name = "tinopanel"
+admin_password=$(gen_pass)
+cd /etc/nginx/
+wget https://scripts.tino.org/dhparam.pem
+#openssl dhparam 2048 -out /etc/nginx/dhparam.pem
+openssl genrsa -out server.key 2048
+openssl rsa -in server.key -out server.key
+openssl req -sha256 -new -key server.key -out server.csr -subj '/CN=localhost'
+openssl x509 -req -sha256 -days 3650 -in server.csr -signkey server.key -out server.crt
+printf "admin:$(openssl passwd -apr1 $admin_password)\n" > /opt/tinopanel/ssl/.htpasswd
+ulimit -n 524288
+
+arch=`uname -m`
+if [ "$arch" = "x86_64" ]; then
+XXX=amd64
+else
+XXX=x86
+fi
+root_password=$(gen_pass)
+
+service nginx restart
+
+cat > "/etc/yum.repos.d/MariaDB.repo" <<END
+# MariaDB 10.4 CentOS repository list
+# http://downloads.mariadb.org/mariadb/repositories/
+[mariadb]
+name = MariaDB
+baseurl = http://yum.mariadb.org/10.4/centos7-$XXX
+gpgkey=http://yum.mariadb.org/RPM-GPG-KEY-MariaDB
+gpgcheck=1
+END
+
+yum install MariaDB-server MariaDB-client -y
+systemctl start mariadb.service
+systemctl enable  mariadb.service
+## config mariadb
+cp /etc/my.cnf /etc/my.cnf-original
+cat > "/etc/my.cnf" <<END
+[mysqld]
+datadir=/var/lib/mysql
+socket=/var/lib/mysql/mysql.sock
+local-infile=0
+innodb_file_per_table
+max-connections=200
+tmp_table_size = 128M
+max_heap_table_size = 128M
+myisam_sort_buffer_size = 64M
+join_buffer_size = 64M
+thread_cache_size = 50
+table_open_cache = 100
+wait_timeout = 120
+interactive_timeout = 120
+sql-mode="NO_ENGINE_SUBSTITUTION"
+bind-address=0.0.0.0
+END
+root_password=$(gen_pass)
+
+#'/usr/bin/mysqladmin' -u root password "$root_password"
+#mysql -u root -p"$root_password" -e "DROP DATABASE test"
+#mysql -u root -p"$root_password" -e "FLUSH PRIVILEGES"
+
+mysql -u root -p"$root_password" << EOF
+ALTER USER root@localhost IDENTIFIED VIA mysql_native_password USING PASSWORD("$root_password");
+use mysql;
+flush privileges;
+EOF
+
+cat > "/root/.my.cnf" <<END
+[client]
+user=root
+password=$root_password
+END
+
+chmod 600 /root/.my.cnf
+systemctl stop mariadb.service
+systemctl restart mariadb.service
+
+## 
+mkdir -p /etc/quicklemp/menu
+cd /etc/quicklemp/menu
+wget http://scripts.tino.org/menu.zip
+unzip menu.zip
+rm -rf menu.zip
+chmod +x /etc/quicklemp/menu/*
+
+cd /etc/quicklemp/
+find ./* -type f -exec chmod +x {} \; 
+cd /etc/quicklemp/menu
+mv tino /usr/bin/
+
+## install csf
+
+systemctl mask firewalld
+systemctl stop firewalld
+
+yum install perl-libwww-perl -y
+cd /tmp
+wget https://download.configserver.com/csf.tgz
+tar -xzf csf.tgz
+cd csf
+sh install.sh
+sed -i 's/TESTING = "1"/TESTING = "0"/g' /etc/csf/csf.conf
+sed -i 's/RESTRICT_SYSLOG = "0"/RESTRICT_SYSLOG = "1"/g' /etc/csf/csf.conf
+
+systemctl enable csf.service
+cp /etc/csf/csf.conf /etc/csf/csf.conf.default.bak
+mv /etc/csf/csf.conf /etc/csf/csf.conf.bak
+
+cat /etc/csf/csf.conf.bak 2>/dev/null | sed -r -e 's/TCP_IN.*=.*//' -e 's/TCP_OUT.*=.*//' -e 's/UDP_IN.*=.*//' -e 's/UDP_OUT.*=.*//' > /etc/csf/csf.conf
+
+##TCP_IN
+old_port=$(cat /etc/csf/csf.conf.bak | grep "TCP_IN =" | sed -r -e 's/(\S)[ \t]+(\S)/\1\n\2/g' -e 's/[\t ]//g' -e 's/;//' -e 's/TCP_IN//' -e 's/=//'| \
+sort | uniq | xargs -L1)
+add_port="7979,3306"
+dot='"'
+new_port="TCP_IN = $dot${old_port},${add_port}$dot"
+echo "$new_port"  >> /etc/csf/csf.conf
+##TCP_OUT
+old_port=$(cat /etc/csf/csf.conf.bak | grep "TCP_OUT =" | sed -r -e 's/(\S)[ \t]+(\S)/\1\n\2/g' -e 's/[\t ]//g' -e 's/;//' -e 's/TCP_OUT//' -e 's/=//'| \
+sort | uniq | xargs -L1)
+add_port="7979,3306"
+dot='"'
+new_port="TCP_OUT = $dot${old_port},${add_port}$dot"
+echo "$new_port"  >> /etc/csf/csf.conf
+
+##UDP_IN
+old_port=$(cat /etc/csf/csf.conf.bak | grep "UDP_IN =" | sed -r -e 's/(\S)[ \t]+(\S)/\1\n\2/g' -e 's/[\t ]//g' -e 's/;//' -e 's/UDP_IN//' -e 's/=//'| \
+sort | uniq | xargs -L1)
+add_port="7979,3306"
+dot='"'
+new_port="UDP_IN = $dot${old_port},${add_port}$dot"
+echo "$new_port"  >> /etc/csf/csf.conf
+##UDP_OUT
+old_port=$(cat /etc/csf/csf.conf.bak | grep "UDP_OUT =" | sed -r -e 's/(\S)[ \t]+(\S)/\1\n\2/g' -e 's/[\t ]//g' -e 's/;//' -e 's/UDP_OUT//' -e 's/=//'| \
+sort | uniq | xargs -L1)
+add_port="7979,3306"
+dot='"'
+new_port="UDP_OUT = $dot${old_port},${add_port}$dot"
+echo "$new_port"  >> /etc/csf/csf.conf
+
+csf -r
+systemctl restart csf.service
+##endcsf
+mkdir -p /etc/quicklemp/domains
+my_ip=$(ip route get 8.8.8.8 | awk -F"src " 'NR==1{split($2,a," ");print a[1]}')
+cat > "/etc/quicklemp/port.txt" <<END
+$admin_port
+END
+cat > "/etc/quicklemp/ip_install" <<END
+$my_ip
+END
+## install rclone
+curl https://rclone.org/install.sh | bash
+
+# install acmesh
+curl https://get.acme.sh | sh &> /dev/null
+
+echo ""
+
+cat > "/opt/server_install_account" <<END
+IP: $my_ip
+Link Admin : http://$my_ip:$admin_port/phpmyadmin
+port :$admin_port
+user login panel: admin
+admin pass $admin_password
+
+root mysql pass:  $root_password
+END
+cat > "/etc/quicklemp/php_install" <<END
+$php_version
+END
+cat > "/etc/quicklemp/tino_version" <<END
+1.0.0
+END
+
+cat > "/etc/quicklemp/php_version_for_install" <<END
+$php_74
+$php_73
+$php_72
+$php_71
+$php_70
+$php_56
+$php_55
+$php_54
+$php_53
+END
+
+
+
+ln -sf /opt/php/php$sock_tino/bin/php /usr/bin/php
+curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar   ## Táº£i wp-cli.
+#php wp-cli.phar --info   ## xÃ¡c nháº­n táº£i thÃ nh cÃ´ng.
+chmod +x wp-cli.phar ## phÃ¢n quyá»n cho wp-cli
+mv wp-cli.phar /usr/local/bin/wp    ## di chuyá»ƒn wp-cli thÃ nh thÆ° viá»‡n.
+
+# phpMyAdmin
+mkdir /opt/tinopanel/private_html/phpmyadmin/
+cd /opt/tinopanel/private_html/phpmyadmin/
+wget --no-check-certificate -q https://files.phpmyadmin.net/phpMyAdmin/4.9.5/phpMyAdmin-4.9.5-english.zip
+unzip -q phpMyAdmin-4.9.5-english.zip
+mv -f phpMyAdmin-4.9.5-english/* .
+rm -rf phpMyAdmin-4.9.5-english*
+
+echo "Link truy cap trang quan ly phpmyadmin: http://$my_ip:$admin_port/phpmyadmin"
+echo "Link truy cap trang quan ly: http://$my_ip:$admin_port:"
+echo "user:admin"
+echo " admin pass:$admin_password"
+echo ""
+echo ""
+echo "Tai khoan quan ly ban co the doc tai file: /opt/server_install_account"
+
+
+
+rm -rf /root/tinovps-install
+rm -rf /root/tino/
+
+sleep 20
+reboot
+
+#!/bin/bash
+# @author: LÃ£ng Tá»­ CÃ´ Äá»™c
+# @website:  https://tinohost.com, https://kienthuclinux.com
+# @since: 2020
